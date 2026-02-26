@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+.wrangler/
+
+# Env and secrets
+.env
+.env.*
+*.local
+
+# Logs and debug
+logs
+*.log
+npm-debug.log*
+.DS_Store
+
+# IDE
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.sw?
+
+# Test / Playwright
+test-results/
+playwright-report/
+.playwright/

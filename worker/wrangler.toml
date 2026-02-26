@@ -1,0 +1,11 @@
+name = "cloudflare-code-assistant-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "SESSION_KV"
+id = "your_kv_id_here"
+

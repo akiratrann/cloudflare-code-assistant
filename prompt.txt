@@ -1,0 +1,136 @@
+
+I want to make a coding assistant just like cursor but leveraging the strong edges of cloudflare ai compared to open ai and anthropic: https://chatgpt.com/s/t_699e0ed2801c819191cc16ae81b1cea0 
+It needs to follow this structure: Optional Assignment Instructions: We plan to fast track review of candidates who complete an assignment to build a type of AI-powered application on Cloudflare. An AI-powered application should include the following components: LLM (recommend using Llama 3.3 on Workers AI), or an external LLM of your choice Workflow / coordination (recommend using Workflows, Workers or Durable Objects) User input via chat or voice (recommend using Pages or Realtime) Memory or state https://developers.cloudflare.com/agents/  https://agents.cloudflare.com/ 
+Please make a plan for our product and execute it in this folder. Use UI layout similar to VScode or Cursor. Please clear this repo if needed to start
+
+are we covering all the features in the chatgpt link i put there?
+
+please do that, we need to cover as many features as possible, also start on the implementation
+
+please test exhaustively first before launching, feel free to use tools like Playwright and other libraries like that that work by interacting with a headless browser. please add all the feaetures suggested by the chatgpt link. Also test comprehensivcely 
+also remember to always docuemnt my prompts in the prompt.txt to follow the project requirement
+
+please dont do session notes, just put my prompts there word to word
+
+add my past prompts too
+
+
+
+add features to make this more like cursor, give files and allow users to add files, allow user to make new project, make new chat, add as much ide features as possible to test this
+
+How can i test the feature of preserved context? in other words, would it be saved under my account? make the log in possible and project sharin gpossible across users if needed
+
+can we add/drop any file?
+
+rememeber to always update prompt.txt appropriately
+
+please add add/drop any file
+
+execute yoru suggestions: ### How your current app already lets you test “ChatGPT-link” style functionality
+
+- **LLM on Workers AI (core chat reasoning)**
+  - **What to test**: Ask coding / architecture questions and confirm Workers AI responds sensibly.
+  - **How**:
+    - Start the Worker (`cd worker && npx wrangler dev --local`) and app (`cd app && npm run dev`).
+    - In Chat, ask things like:
+      - “Design a Cloudflare Worker + KV architecture for a feature flag service.”
+      - “Refactor this React hook for readability:” and paste code.
+
+- **Workflow / coordination (Worker as orchestrator)**
+  - **What to test**: That your Worker:
+    - Validates inputs.
+    - Loads & trims KV history.
+    - Builds a coherent system+history+user prompt.
+  - **How**:
+    - Stay in the **same project + chat**, ask a multi-step question (e.g., first “draft a function,” then “optimize it,” then “add tests”).
+    - Confirm the assistant remembers earlier steps and builds on them instead of restarting.
+
+- **User input via rich UI (Pages-like VSCode shell)**
+  - **What to test**: Multiple chats, projects, and files in the VSCode-like interface.
+  - **How**:
+    - Use **Projects / Chats / Files** in the left sidebar:
+      - Create two projects (e.g. “API service” and “Frontend”).
+      - For each, create multiple chats (“Design”, “Bugs”, etc.).
+    - Switch between projects/chats and confirm:
+      - The right chat history shows.
+      - Chat context refers to the right project name.
+
+- **Memory / state (KV + per-user)**  
+  - **What to test**: That history and state are preserved across turns and between “users”.
+  - **How**:
+    - In a project, ask a question, get an answer.
+    - Refresh the page and keep the same **user id** (shown in the right pane).
+    - Ask a follow-up that depends on prior context (“now improve that function to handle errors”).
+    - Then click **Change user**, pick a new ID, and ask the *same* question; this should behave like a fresh conversation (no prior context).
+
+- **IDE-like features (Cursor-style behavior)**
+  - **What to test**:
+    - Virtual files as context.
+    - Multiple files & projects changing responses.
+  - **How**:
+    - In **Editor** tab, edit `src/main.ts` to contain some distinctive code.
+    - Switch back to **Chat** and ask:
+      - “Explain what `src/main.ts` does and how to improve it.”
+    - Add another file (`+ New file`, e.g. `src/utils/math.ts`), fill with code, and verify the assistant now references the new file when you ask.
+    - Create a second project with different files and confirm that chat responses differ appropriately.
+
+- **Automated testing (Playwright)**
+  - **What to test**: That your basic flows work in a headless browser.
+  - **How**:
+    - Ensure the Worker is running (as above).
+    - From `app/`: `npm run test:e2e`.
+    - This validates:
+      - Layout chrome is present (title, sidebar sections).
+      - You can send a message and see it rendered.
+      - A simulated Worker failure shows the friendly error bubble.
+
+### Additional features you could add next to get closer to Cursor
+
+If you want to go further (I can implement these next if you confirm):
+
+- **Project sharing + backend project storage**
+  - Worker endpoints like:
+    - `POST /api/projects` to save a project (files + metadata) under a `userId`.
+    - `GET /api/projects/:id` to load a shared project by ID.
+  - UI:
+    - “Share project” button that copies a URL (with project id).
+    - “Import project” dialog to load someone else’s project.
+  - **Tests**: Playwright flow that creates a project, calls backend to save, then reloads page and imports by id.
+
+- **“Run” commands / tools (simulated IDE tools)**
+  - Without actually executing arbitrary code, the Worker could expose:
+    - A “dry-run linter” that just analyzes text.
+    - A “test plan generator” tool.
+  - **Tests**: Chat prompts like “run analysis on file X” and assert specific tool-output markers in replies.
+
+- **Richer context controls**
+  - Per-message toggles (“include active file”, “include all files in project”).
+  - A right-pane view of “what context was sent to the model” so users can inspect the prompt.
+
+creat account and log in should require password and usernam like a normal website
+
+when we hover above a file or chat or prohect name on the right tab, there should be icon buttons to rename or delete file, or all options provided by cursor
+
+put Chat and Editor tabs separate so that we can edit and prompt at the same time, just like cursor
+
+we should be able to share it by username, and yes please do those things
+
+put the log in or sign up on the top bar to save space
+
+put the context tab switchable with the chat tab, like the way we can click switch between browser tabs
+
+the layout should be clear that projects contains some chat and files
+
+we should have this as a little drop down thing like cursor
+
+log in should give error ig user not signed up. and sign up should error for already taken usernam 
+
+we dont need the Edit here; active file is sent as context when you chat, displaying file and file name is enough, also we should be able to open files on different tabs like in cursor, and this should work smoothly 
+
+there should also some code suggestion when the user is typing
+
+there should be proper code highlighting like in cursor 
+
+enable copy and paste for the chat and the editor
+
+please do all thaet (Copied toast, per-line copy in diff)
