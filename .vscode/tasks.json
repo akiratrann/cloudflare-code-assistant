@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Open app in Simple Browser (tab 1)",
+      "type": "shell",
+      "command": "echo ${input:openBrowser1}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "never", "echo": false, "panel": "shared" }
+    },
+    {
+      "label": "Open app in Simple Browser (tab 2)",
+      "type": "shell",
+      "command": "echo ${input:openBrowser2}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "never", "echo": false, "panel": "shared" }
+    },
+    {
+      "label": "Open 2 app tabs in workspace",
+      "dependsOn": ["Open app in Simple Browser (tab 1)", "Open app in Simple Browser (tab 2)"],
+      "dependsOrder": "sequence"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "openBrowser1",
+      "type": "command",
+      "command": "simpleBrowser.api.open",
+      "args": ["http://localhost:5173"]
+    },
+    {
+      "id": "openBrowser2",
+      "type": "command",
+      "command": "simpleBrowser.api.open",
+      "args": ["http://localhost:5173"]
+    }
+  ]
+}

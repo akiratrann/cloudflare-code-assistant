@@ -1008,6 +1008,113 @@
   margin-bottom: 0;
 }
 
+.right-pane-hint {
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #94a3b8;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.right-pane-hint strong {
+  color: #e2e8f0;
+}
+
+.shared-projects-panel {
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.65);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.shared-projects-panel-title {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9ca3af;
+  margin-bottom: 0.45rem;
+}
+
+.shared-projects-subheading {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #c4d4f5;
+  margin: 0.65rem 0 0.35rem;
+}
+
+.shared-projects-subheading:first-of-type {
+  margin-top: 0.15rem;
+}
+
+.shared-projects-subheading-out {
+  color: #a7f3d0;
+}
+
+.shared-projects-empty {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.shared-projects-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.shared-projects-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: 0.35rem;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(71, 85, 105, 0.45);
+}
+
+.shared-projects-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.shared-projects-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #f1f5f9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-projects-owner {
+  font-size: 0.68rem;
+  color: #94a3b8;
+}
+
+.shared-projects-open-btn {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(129, 140, 248, 0.7);
+  background: rgba(79, 70, 229, 0.35);
+  color: #e0e7ff;
+  cursor: pointer;
+}
+
+.shared-projects-open-btn:hover {
+  background: rgba(99, 102, 241, 0.5);
+}
+
 .right-pane {
   padding: 0.6rem 0.7rem;
   background: radial-gradient(circle at top right, #020617 0, #020617 40%, #020617 100%);

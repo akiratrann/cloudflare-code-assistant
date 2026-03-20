@@ -4,8 +4,10 @@ compatibility_date = "2025-01-01"
 
 [ai]
 binding = "AI"
+remote = true
 
+# Create your own: npx wrangler kv namespace create SESSION_KV
 [[kv_namespaces]]
 binding = "SESSION_KV"
-id = "your_kv_id_here"
+id = "cf1f06d220144fe6920bf6506102da95"
 

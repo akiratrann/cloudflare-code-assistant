@@ -14,6 +14,8 @@ interface ChatMessage {
 interface ChatRequestBody {
   sessionId: string;
   message: string;
+  projectId?: string;
+  chatId?: string;
 }
 
 interface AuthRequestBody {
@@ -27,13 +29,20 @@ interface ProjectFilePayload {
 }
 
 interface ProjectChatPayload {
+  id?: string;
   name: string;
+  messages?: { role: Role; content: string; timestamp: number }[];
 }
 
 interface ProjectSaveRequestBody {
   name: string;
   files: ProjectFilePayload[];
   chats: ProjectChatPayload[];
+  shareWith?: string;
+}
+
+interface UserStatePayload {
+  state: unknown;
 }
 
 interface StoredProject {
@@ -42,11 +51,17 @@ interface StoredProject {
   files: ProjectFilePayload[];
   chats: ProjectChatPayload[];
   createdAt: number;
+  sharedWith?: string[];
 }
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct';
+const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const MAX_HISTORY_TURNS = 16;
 const SESSION_TTL_SECONDS = 60 * 60 * 24; // 1 day
+
+const MAX_SHARE_MESSAGES_PER_CHAT = 120;
+const MAX_SHARE_MESSAGE_CHARS = 24_000;
+const MAX_SHARE_FILE_CHARS = 900_000;
+const KV_VALUE_SOFT_LIMIT_BYTES = 24 * 1024 * 1024;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -67,6 +82,15 @@ export default {
       return handleLogin(request, env);
     }
 
+    if (url.pathname === '/api/user-state') {
+      if (request.method === 'GET') {
+        return handleUserStateGet(request, env);
+      }
+      if (request.method === 'POST') {
+        return handleUserStateSave(request, env);
+      }
+    }
+
     const projectMatch = url.pathname.match(/^\/api\/projects(?:\/([a-f0-9-]+))?$/);
     if (projectMatch) {
       const projectId = projectMatch[1];
@@ -76,8 +100,19 @@ export default {
       if (request.method === 'GET' && projectId) {
         return handleProjectGet(projectId, env);
       }
-      if (request.method === 'GET' && !projectId && url.searchParams.get('owner')) {
-        return handleProjectListByOwner(url.searchParams.get('owner')!, env);
+      if (request.method === 'GET' && !projectId && url.searchParams.get('list') === 'sharing') {
+        const viewer = await getUsernameFromToken(request, env);
+        if (!viewer) {
+          return json({ error: 'Unauthorized' }, 401);
+        }
+        return handleProjectSharingLists(viewer, env);
+      }
+      if (request.method === 'GET' && !projectId && url.searchParams.get('sharedWith') === 'me') {
+        const viewer = await getUsernameFromToken(request, env);
+        if (!viewer) {
+          return json({ error: 'Unauthorized' }, 401);
+        }
+        return handleProjectListSharedWith(viewer, env);
       }
     }
 
@@ -99,10 +134,24 @@ export default {
           timestamp: Date.now(),
         };
 
+        let systemContent =
+          'You are a coding assistant similar to Cursor, focused on helping with code, architecture, and debugging. You run on Cloudflare Workers AI, have limited context, and should be concise, explicit, and pragmatic. Prefer TypeScript and Cloudflare-native patterns when relevant.\n\n' +
+          'ACTIVE FILE EDITS: The user message may include an active file path and full file contents. When the user asks to remove, delete, omit, strip, or stop including specific code (e.g. console.log lines), or to rewrite/refactor the file, you MUST include exactly ONE markdown code fence with the COMPLETE updated file — every line that should exist after the change, not a diff and not only the changed lines. A short fragment will overwrite their file and destroy code.\n\n' +
+          'If you cannot return the entire file, do NOT use a code fence for a partial snippet; explain in prose and ask them to use Suggest edit or paste the full file.\n\n' +
+          'For small additive suggestions at the end of the file (not removals), a short fenced snippet is OK.';
+        if (body.projectId && body.chatId) {
+          const partnerSummary = await loadPartnerHistorySummary(env, body.projectId, body.chatId);
+          if (partnerSummary) {
+            systemContent +=
+              '\n\nThe user is viewing a shared copy of this project. Their chat panel starts empty, but the following is read-only prior conversation history from the original owner. Use it to answer questions about what was discussed, decisions made, or code that was explained. Do not repeat the entire history; integrate it only as needed.\n\n---\n' +
+              partnerSummary +
+              '\n---';
+          }
+        }
+
         const systemMessage: ChatMessage = {
           role: 'system',
-          content:
-            'You are a coding assistant similar to Cursor, focused on helping with code, architecture, and debugging. You run on Cloudflare Workers AI, have limited context, and should be concise, explicit, and pragmatic. Prefer TypeScript and Cloudflare-native patterns when relevant.',
+          content: systemContent,
           timestamp: Date.now(),
         };
 
@@ -184,10 +233,7 @@ export default {
     }
     }
 
-    return new Response('Not found', {
-      status: 404,
-      headers: corsHeaders(),
-    });
+    return json({ error: 'Not found' }, 404);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -280,6 +326,30 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
   }
 }
 
+async function loadPartnerHistorySummary(
+  env: Env,
+  projectId: string,
+  chatId: string,
+): Promise<string | null> {
+  const raw = await env.SESSION_KV.get(`project:${projectId}`);
+  if (!raw) return null;
+  try {
+    const stored = JSON.parse(raw) as StoredProject;
+    const chat = stored.chats.find((c) => c.id === chatId);
+    if (!chat?.messages?.length) return null;
+    const lines: string[] = [];
+    for (const m of chat.messages) {
+      if (m.role === 'user' || m.role === 'assistant') {
+        const label = m.role === 'user' ? 'Owner' : 'Assistant';
+        lines.push(`${label}: ${m.content}`);
+      }
+    }
+    return lines.length ? lines.join('\n\n') : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadHistory(env: Env, key: string): Promise<ChatMessage[]> {
   const raw = await env.SESSION_KV.get(key);
   if (!raw) return [];
@@ -344,15 +414,51 @@ async function handleProjectSave(request: Request, env: Env): Promise<Response> 
     if (!body.name || !Array.isArray(body.files) || !Array.isArray(body.chats)) {
       return json({ error: 'name, files, and chats are required' }, 400);
     }
+    const shareWith = body.shareWith?.trim().toLowerCase();
+    if (shareWith && !/^[a-z0-9._-]{1,64}$/.test(shareWith)) {
+      return json(
+        {
+          error:
+            'Share target username may only use letters, numbers, dots, underscores, and hyphens (1–64 characters).',
+        },
+        400,
+      );
+    }
     const projectId = crypto.randomUUID();
     const stored: StoredProject = {
       ownerId: username,
-      name: body.name,
-      files: body.files.map((f) => ({ path: f.path ?? '', content: f.content ?? '' })),
-      chats: body.chats.map((c) => ({ name: c.name ?? 'Chat' })),
+      name: String(body.name).slice(0, 500),
+      files: body.files.map((f) => ({
+        path: String(f.path ?? '').slice(0, 1024),
+        content: String(f.content ?? '').slice(0, MAX_SHARE_FILE_CHARS),
+      })),
+      chats: body.chats.map((c) => ({
+        id: c.id,
+        name: (c.name ?? 'Chat').slice(0, 200),
+        messages: Array.isArray(c.messages)
+          ? c.messages.slice(-MAX_SHARE_MESSAGES_PER_CHAT).map((m) => ({
+              role:
+                m.role === 'assistant' || m.role === 'user' || m.role === 'system'
+                  ? m.role
+                  : 'user',
+              content: (typeof m.content === 'string' ? m.content : '').slice(0, MAX_SHARE_MESSAGE_CHARS),
+              timestamp: typeof m.timestamp === 'number' ? m.timestamp : Date.now(),
+            }))
+          : [],
+      })),
       createdAt: Date.now(),
+      sharedWith: shareWith ? [shareWith] : [],
     };
-    await env.SESSION_KV.put(`project:${projectId}`, JSON.stringify(stored));
+    const projectJson = JSON.stringify(stored);
+    if (projectJson.length > KV_VALUE_SOFT_LIMIT_BYTES) {
+      return json(
+        {
+          error: 'Project is too large to share (KV limit). Remove large files or clear old chat messages and try again.',
+        },
+        413,
+      );
+    }
+    await env.SESSION_KV.put(`project:${projectId}`, projectJson);
 
     const listKey = `userProjects:${username}`;
     const existingList = await env.SESSION_KV.get(listKey);
@@ -368,10 +474,54 @@ async function handleProjectSave(request: Request, env: Env): Promise<Response> 
     ids.push(projectId);
     await env.SESSION_KV.put(listKey, JSON.stringify(ids));
 
-    return json({ projectId, username }, 201);
+    if (shareWith) {
+      const sharedKey = `sharedWith:${shareWith}`;
+      const existingShared = await env.SESSION_KV.get(sharedKey);
+      let sharedIds: string[] = [];
+      if (existingShared) {
+        try {
+          sharedIds = JSON.parse(existingShared) as string[];
+          if (!Array.isArray(sharedIds)) sharedIds = [];
+        } catch {
+          sharedIds = [];
+        }
+      }
+      sharedIds.push(projectId);
+      await env.SESSION_KV.put(sharedKey, JSON.stringify(sharedIds));
+
+      const outKey = `outgoingShares:${username.trim().toLowerCase()}`;
+      const outRaw = await env.SESSION_KV.get(outKey);
+      let outgoing: { projectId: string; name: string; sharedWith: string; createdAt: number }[] = [];
+      if (outRaw) {
+        try {
+          outgoing = JSON.parse(outRaw) as typeof outgoing;
+          if (!Array.isArray(outgoing)) outgoing = [];
+        } catch {
+          outgoing = [];
+        }
+      }
+      outgoing.push({
+        projectId,
+        name: body.name,
+        sharedWith: shareWith,
+        createdAt: Date.now(),
+      });
+      await env.SESSION_KV.put(outKey, JSON.stringify(outgoing));
+    }
+
+    return json({ projectId, username, sharedWith: shareWith ?? null }, 201);
   } catch (err) {
     console.error('project save error', err);
-    return json({ error: 'Internal error' }, 500);
+    const detail = err instanceof Error ? err.message : String(err);
+    return json(
+      {
+        error: 'Could not save project to storage (KV).',
+        detail,
+        hint:
+          'If you see this in dev: run `cd worker && npx wrangler kv namespace create SESSION_KV`, put the returned id in wrangler.toml as SESSION_KV id, or use `npx wrangler dev --local --port 8787` for a local KV.',
+      },
+      500,
+    );
   }
 }
 
@@ -421,5 +571,98 @@ async function handleProjectListByOwner(owner: string, env: Env): Promise<Respon
     }
   }
   return json({ projects });
+}
+
+async function getIncomingProjectsForUser(username: string, env: Env): Promise<{ id: string; name: string; ownerId: string }[]> {
+  const listKey = `sharedWith:${username.trim().toLowerCase()}`;
+  const raw = await env.SESSION_KV.get(listKey);
+  if (!raw) {
+    return [];
+  }
+  let ids: string[] = [];
+  try {
+    ids = JSON.parse(raw) as string[];
+    if (!Array.isArray(ids)) ids = [];
+  } catch {
+    return [];
+  }
+  const projects: { id: string; name: string; ownerId: string }[] = [];
+  for (const id of ids) {
+    const p = await env.SESSION_KV.get(`project:${id}`);
+    if (p) {
+      try {
+        const parsed = JSON.parse(p) as StoredProject;
+        projects.push({ id, name: parsed.name, ownerId: parsed.ownerId });
+      } catch {
+        // skip
+      }
+    }
+  }
+  return projects;
+}
+
+async function handleProjectListSharedWith(username: string, env: Env): Promise<Response> {
+  const projects = await getIncomingProjectsForUser(username, env);
+  return json({ projects });
+}
+
+async function handleProjectSharingLists(viewer: string, env: Env): Promise<Response> {
+  const incoming = await getIncomingProjectsForUser(viewer, env);
+  const outKey = `outgoingShares:${viewer.trim().toLowerCase()}`;
+  const outRaw = await env.SESSION_KV.get(outKey);
+  let outgoingRecords: { projectId: string; name: string; sharedWith: string; createdAt: number }[] = [];
+  if (outRaw) {
+    try {
+      outgoingRecords = JSON.parse(outRaw) as typeof outgoingRecords;
+      if (!Array.isArray(outgoingRecords)) outgoingRecords = [];
+    } catch {
+      outgoingRecords = [];
+    }
+  }
+  const outgoing: { id: string; name: string; sharedWith: string }[] = [];
+  for (const r of outgoingRecords) {
+    const raw = await env.SESSION_KV.get(`project:${r.projectId}`);
+    if (raw) {
+      outgoing.push({ id: r.projectId, name: r.name, sharedWith: r.sharedWith });
+    }
+  }
+  return json({ incoming, outgoing });
+}
+
+async function handleUserStateSave(request: Request, env: Env): Promise<Response> {
+  const username = await getUsernameFromToken(request, env);
+  if (!username) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+  try {
+    const body = (await request.json()) as Partial<UserStatePayload>;
+    if (body.state == null) {
+      return json({ error: 'state is required' }, 400);
+    }
+    const key = `userState:${username}`;
+    await env.SESSION_KV.put(key, JSON.stringify(body.state));
+    return json({ ok: true }, 200);
+  } catch (err) {
+    console.error('user state save error', err);
+    return json({ error: 'Internal error' }, 500);
+  }
+}
+
+async function handleUserStateGet(request: Request, env: Env): Promise<Response> {
+  const username = await getUsernameFromToken(request, env);
+  if (!username) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+  const key = `userState:${username}`;
+  const raw = await env.SESSION_KV.get(key);
+  if (!raw) {
+    return json({ state: null }, 200);
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return json({ state: parsed }, 200);
+  } catch {
+    return json({ state: null }, 200);
+  }
 }
 

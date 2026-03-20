@@ -31,6 +31,8 @@ interface Project {
   activeChatId: string
   activeFileId?: string
   openFileIds?: string[]
+  /** KV project id when this is a shared/imported copy; used to load owner's chat history for the model only */
+  importedProjectId?: string
 }
 
 const USER_STORAGE_KEY = 'cf-assistant-user-id'
@@ -98,6 +100,63 @@ function createInitialState(): AppState {
   }
 }
 
+function extractCodeSnippet(reply: string): string | null {
+  const trimmed = reply.trim()
+  if (!trimmed) return null
+  const fenceStart = trimmed.indexOf('```')
+  if (fenceStart === -1) {
+    return trimmed
+  }
+  const firstNewline = trimmed.indexOf('\n', fenceStart + 3)
+  const afterHeaderIndex = firstNewline === -1 ? fenceStart + 3 : firstNewline + 1
+  const fenceEnd = trimmed.indexOf('```', afterHeaderIndex)
+  const inner =
+    fenceEnd === -1 ? trimmed.slice(afterHeaderIndex) : trimmed.slice(afterHeaderIndex, fenceEnd)
+  return inner.trim() || null
+}
+
+function userWantsActiveFileRewrite(message: string): boolean {
+  const m = message.toLowerCase()
+  return (
+    /\b(remove|delete|strip|omit|drop|undo|revert)\b/.test(m) ||
+    /\b(get rid of|take out|take away|clear out|no longer)\b/.test(m) ||
+    /\b(don't add|do not add|dont add|stop adding|no console|without (those |the )?logs?)\b/.test(m) ||
+    /\b(remove those|remove the|delete those|delete the)\b/.test(m) ||
+    /\b(rewrite|replace)\b.*\b(file|code)\b/.test(m) ||
+    /\b(refactor|update|change)\b.*\b(file|code)\b/.test(m) ||
+    /\b(whole file|entire file|full file)\b/.test(m)
+  )
+}
+
+function extractLargestCodeFence(reply: string): string | null {
+  const re = /```[\w.-]*\n([\s\S]*?)```/g
+  let best: string | null = null
+  let bestLen = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(reply)) !== null) {
+    const inner = m[1].trim()
+    if (inner.length > bestLen) {
+      bestLen = inner.length
+      best = inner
+    }
+  }
+  return best
+}
+
+function isPlausibleFullFileReplace(oldContent: string, newSnippet: string): boolean {
+  const oldT = oldContent.trim()
+  const newT = newSnippet.trim()
+  const oldLines = oldContent.split('\n').length
+  const newLines = newSnippet.split('\n').length
+  if (newLines < 2) return false
+  if (oldT.length > 150 && newT.length < Math.min(80, oldT.length * 0.12)) return false
+  if (oldLines <= 8) {
+    return newLines >= Math.max(2, Math.ceil(oldLines * 0.45))
+  }
+  const minNew = Math.max(5, Math.floor(oldLines * 0.4))
+  return newLines >= minNew
+}
+
 function App() {
   const [authToken, setAuthToken] = useState<string | null>(() =>
     typeof window === 'undefined' ? null : window.localStorage.getItem(AUTH_TOKEN_KEY),
@@ -130,10 +189,16 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [authLoading, setAuthLoading] = useState(false)
   const [shareStatus, setShareStatus] = useState<string | null>(null)
-  const [importUsername, setImportUsername] = useState('')
-  const [importProjects, setImportProjects] = useState<{ id: string; name: string }[]>([])
+  const [shareTargetUsername, setShareTargetUsername] = useState('')
+  const [importIncoming, setImportIncoming] = useState<{ id: string; name: string; ownerId?: string }[]>(
+    [],
+  )
+  const [importOutgoing, setImportOutgoing] = useState<{ id: string; name: string; sharedWith?: string }[]>(
+    [],
+  )
   const [importLoading, setImportLoading] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
+  const [importListFetched, setImportListFetched] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'context'>('chat')
   const [projectContentsOpen, setProjectContentsOpen] = useState(true)
@@ -178,7 +243,14 @@ function App() {
     if (!projectId) return
     fetch(`/api/projects/${projectId}`)
       .then((res) => res.json())
-      .then((data: { name?: string; files?: { path: string; content: string }[]; chats?: { name: string }[]; error?: string }) => {
+      .then(
+        (data: {
+          id?: string
+          name?: string
+          files?: { path: string; content: string }[]
+          chats?: { id?: string; name: string }[]
+          error?: string
+        }) => {
         if (data.error) return
         const files: VirtualFile[] = (data.files ?? []).map((f) => ({
           id: crypto.randomUUID(),
@@ -186,7 +258,7 @@ function App() {
           content: f.content ?? '',
         }))
         const chats: ChatSession[] = (data.chats ?? []).map((c) => ({
-          id: crypto.randomUUID(),
+          id: c.id ?? crypto.randomUUID(),
           name: c.name ?? 'Chat',
           messages: [],
         }))
@@ -197,6 +269,7 @@ function App() {
           chats: chats.length ? chats : [{ id: crypto.randomUUID(), name: 'Chat 1', messages: [] }],
           activeChatId: chats[0]?.id ?? crypto.randomUUID(),
           activeFileId: files[0]?.id,
+          importedProjectId: projectId,
         }
         if (newProject.chats.length) newProject.activeChatId = newProject.chats[0].id
         if (newProject.files.length) newProject.activeFileId = newProject.files[0].id
@@ -215,6 +288,8 @@ function App() {
     activeProject.chats.find((c) => c.id === activeProject.activeChatId) ?? activeProject.chats[0]
   const activeFile =
     activeProject.files.find((f) => f.id === activeProject.activeFileId) ?? activeProject.files[0]
+
+  const sharingTotal = importIncoming.length + importOutgoing.length
 
   const openFileIds =
     (activeProject.openFileIds && activeProject.openFileIds.length > 0
@@ -294,6 +369,9 @@ function App() {
           body: JSON.stringify({
             sessionId,
             message: prompt,
+            ...(activeProject.importedProjectId
+              ? { projectId: activeProject.importedProjectId, chatId: activeChat.id }
+              : {}),
           }),
           signal: controller.signal,
         })
@@ -314,7 +392,14 @@ function App() {
       window.clearTimeout(handle)
       inlineSuggestionAbortRef.current?.abort()
     }
-  }, [activeFile?.id, activeFile?.content, activeProject.id, activeChat.id, userId])
+  }, [
+    activeFile?.id,
+    activeFile?.content,
+    activeProject.id,
+    activeProject.importedProjectId,
+    activeChat.id,
+    userId,
+  ])
 
   const messages = activeChat?.messages ?? []
 
@@ -349,6 +434,22 @@ function App() {
         window.localStorage.setItem(AUTH_USERNAME_KEY, data.username)
         setAuthToken(data.token)
         setAuthUsername(data.username)
+        try {
+          const resState = await fetch('/api/user-state', {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${data.token}`,
+            },
+          })
+          if (resState.ok) {
+            const payload = (await resState.json()) as { state?: AppState | null }
+            if (payload.state && payload.state.projects && payload.state.projects.length > 0) {
+              setState(payload.state)
+            }
+          }
+        } catch {
+          // ignore state load failures; user can continue with local state
+        }
         setAuthFormUsername('')
         setAuthFormPassword('')
         setAccountMenuOpen(false)
@@ -410,6 +511,9 @@ function App() {
         body: JSON.stringify({
           sessionId,
           message: promptText,
+          ...(activeProject.importedProjectId
+            ? { projectId: activeProject.importedProjectId, chatId: activeChat.id }
+            : {}),
         }),
       })
 
@@ -487,10 +591,29 @@ function App() {
   function handleLogout() {
     window.localStorage.removeItem(AUTH_TOKEN_KEY)
     window.localStorage.removeItem(AUTH_USERNAME_KEY)
+    window.localStorage.removeItem(STORAGE_KEY)
     setAuthToken(null)
     setAuthUsername(null)
     setAccountMenuOpen(false)
+    setState(createInitialState())
   }
+
+  useEffect(() => {
+    if (!authToken || !authUsername) return
+    const handle = window.setTimeout(() => {
+      fetch('/api/user-state', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ state }),
+      }).catch(() => {})
+    }, 800)
+    return () => {
+      window.clearTimeout(handle)
+    }
+  }, [state, authToken, authUsername])
 
   function handleSwitchProject(projectId: string) {
     setState((prev) => ({
@@ -787,6 +910,11 @@ function App() {
       setShareStatus('Log in to share projects.')
       return
     }
+    const target = shareTargetUsername.trim().toLowerCase()
+    if (!target) {
+      setShareStatus('Enter a username to share with.')
+      return
+    }
     setShareStatus(null)
     try {
       const res = await fetch('/api/projects', {
@@ -798,19 +926,39 @@ function App() {
         body: JSON.stringify({
           name: activeProject.name,
           files: activeProject.files.map((f) => ({ path: f.path, content: f.content })),
-          chats: activeProject.chats.map((c) => ({ name: c.name })),
+          chats: activeProject.chats.map((c) => ({
+            id: c.id,
+            name: c.name,
+            messages: c.messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+              timestamp: m.timestamp,
+            })),
+          })),
+          shareWith: target,
         }),
       })
-      const data = (await res.json()) as { projectId?: string; username?: string; error?: string }
+      const data = (await res.json()) as {
+        projectId?: string
+        username?: string
+        error?: string
+        detail?: string
+        hint?: string
+      }
       if (!res.ok) {
-        setShareStatus(data.error ?? 'Failed to share')
+        if (res.status === 401) {
+          setShareStatus(
+            'Unauthorized — your login session is not valid on the server (often after KV or Worker changes). Log out, log in again, then share.',
+          )
+          return
+        }
+        const parts = [data.error, data.detail, data.hint].filter(Boolean)
+        setShareStatus(parts.join(' ') || 'Failed to share')
         return
       }
       if (data.projectId) {
-        const base = window.location.origin + window.location.pathname
-        const link = `${base}?project=${data.projectId}`
-        navigator.clipboard.writeText(link).catch(() => {})
-        setShareStatus(`Shared. Link copied. Others can import by username "${data.username}".`)
+        setShareStatus(`Shared with "${target}". They can load it from their account.`)
+        setShareTargetUsername('')
       }
     } catch {
       setShareStatus('Network error.')
@@ -818,25 +966,58 @@ function App() {
   }
 
   async function handleImportList() {
-    const username = importUsername.trim().toLowerCase()
-    if (!username) {
-      setImportError('Enter a username')
+    if (!authToken || !authUsername) {
+      setImportError('Log in to load projects shared with you.')
       return
     }
     setImportError(null)
     setImportLoading(true)
     try {
-      const res = await fetch(`/api/projects?owner=${encodeURIComponent(username)}`)
-      const data = (await res.json()) as { projects?: { id: string; name: string }[]; error?: string }
-      if (!res.ok) {
-        setImportError(data.error ?? 'Failed to load')
-        setImportProjects([])
+      const res = await fetch('/api/projects?list=sharing', {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      })
+      const text = await res.text()
+      let data: {
+        incoming?: { id: string; name: string; ownerId?: string }[]
+        outgoing?: { id: string; name: string; sharedWith?: string }[]
+        error?: string
+      } = {}
+      try {
+        data = text ? (JSON.parse(text) as typeof data) : {}
+      } catch {
+        setImportError(
+          `Bad response from API (${res.status}). Start the Worker: cd worker && npx wrangler dev --port 8787`,
+        )
+        setImportIncoming([])
+        setImportOutgoing([])
+        setImportListFetched(false)
         return
       }
-      setImportProjects(data.projects ?? [])
+      if (!res.ok) {
+        if (res.status === 401) {
+          setImportError(
+            `Unauthorized — your session is not valid on this Worker (restart or KV change often causes this). Log out and log in again. You must be logged in as the exact username your partner typed in "Share with username" (you are "${authUsername ?? '?'}"). You and your partner must use the same app + Worker (e.g. both localhost:5173 → same wrangler dev) so shares land in the same KV.`,
+          )
+        } else {
+          setImportError(data.error ?? `Failed to load (${res.status})`)
+        }
+        setImportIncoming([])
+        setImportOutgoing([])
+        setImportListFetched(false)
+        return
+      }
+      setImportIncoming(data.incoming ?? [])
+      setImportOutgoing(data.outgoing ?? [])
+      setImportListFetched(true)
     } catch {
-      setImportError('Network error.')
-      setImportProjects([])
+      setImportError(
+        'Could not reach the API. Is the Cloudflare Worker running on http://127.0.0.1:8787?',
+      )
+      setImportIncoming([])
+      setImportOutgoing([])
+      setImportListFetched(false)
     } finally {
       setImportLoading(false)
     }
@@ -850,20 +1031,21 @@ function App() {
         id?: string
         name?: string
         files?: { path: string; content: string }[]
-        chats?: { name: string }[]
+        chats?: { id?: string; name: string; messages?: unknown[] }[]
         error?: string
       }
       if (!res.ok) {
         setImportError(data.error ?? 'Failed to load project')
         return
       }
+      const kvProjectId = data.id ?? projectId
       const files: VirtualFile[] = (data.files ?? []).map((f) => ({
         id: crypto.randomUUID(),
         path: f.path,
         content: f.content ?? '',
       }))
       const chats: ChatSession[] = (data.chats ?? []).map((c) => ({
-        id: crypto.randomUUID(),
+        id: c.id ?? crypto.randomUUID(),
         name: c.name ?? 'Chat',
         messages: [],
       }))
@@ -871,13 +1053,12 @@ function App() {
       const fileId = files[0]?.id
       const newProject: Project = {
         id: crypto.randomUUID(),
-        // Keep the original project name from the owner so importing
-        // by username gives you the exact same project labels.
         name: data.name ?? 'Imported',
         files,
         chats: chats.length ? chats : [{ id: crypto.randomUUID(), name: 'Chat 1', messages: [] }],
         activeChatId: chatId ?? crypto.randomUUID(),
         activeFileId: fileId,
+        importedProjectId: kvProjectId,
       }
       if (newProject.chats.length && !chatId) {
         newProject.activeChatId = newProject.chats[0].id
@@ -890,8 +1071,8 @@ function App() {
         projects: [...prev.projects, newProject],
         activeProjectId: newProject.id,
       }))
-      setImportProjects([])
-      setImportUsername('')
+      setImportIncoming((prev) => prev.filter((p) => p.id !== projectId))
+      setImportOutgoing((prev) => prev.filter((p) => p.id !== projectId))
     } catch {
       setImportError('Network error.')
     }
@@ -1020,6 +1201,9 @@ function App() {
         body: JSON.stringify({
           sessionId,
           message: trimmed + openFileSummary,
+          ...(activeProject.importedProjectId
+            ? { projectId: activeProject.importedProjectId, chatId: activeChat.id }
+            : {}),
         }),
       })
 
@@ -1032,58 +1216,58 @@ function App() {
         messages?: { role: Role; content: string; timestamp: number }[]
       }
 
-      if (data.messages && Array.isArray(data.messages)) {
-        const withIds: Message[] = data.messages.map((m, index) => ({
-          id: `${m.role}-${m.timestamp}-${index}`,
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp,
-        }))
+      const wantsRewrite = Boolean(activeFile && userWantsActiveFileRewrite(trimmed))
+      const snippet = wantsRewrite
+        ? extractLargestCodeFence(data.reply) ?? extractCodeSnippet(data.reply)
+        : extractCodeSnippet(data.reply)
+      const rewriteFile = Boolean(
+        wantsRewrite &&
+          snippet &&
+          activeFile &&
+          isPlausibleFullFileReplace(activeFile.content, snippet),
+      )
 
-        setState((prev) => ({
-          ...prev,
-          projects: prev.projects.map((p) =>
-            p.id === activeProject.id
-              ? {
-                  ...p,
-                  chats: p.chats.map((c) =>
-                    c.id === activeChat.id
-                      ? {
-                          ...c,
-                          messages: withIds,
-                        }
-                      : c,
-                  ),
-                }
-              : p,
-          ),
-        }))
-      } else {
-        const assistantMessage: Message = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: data.reply,
-          timestamp: Date.now(),
-        }
-        setState((prev) => ({
-          ...prev,
-          projects: prev.projects.map((p) =>
-            p.id === activeProject.id
-              ? {
-                  ...p,
-                  chats: p.chats.map((c) =>
-                    c.id === activeChat.id
-                      ? {
-                          ...c,
-                          messages: [...c.messages, assistantMessage],
-                        }
-                      : c,
-                  ),
-                }
-              : p,
-          ),
-        }))
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: data.reply,
+        timestamp: Date.now(),
       }
+
+      setState((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) => {
+          if (p.id !== activeProject.id) return p
+          return {
+            ...p,
+            chats: p.chats.map((c) =>
+              c.id === activeChat.id
+                ? {
+                    ...c,
+                    messages: [...c.messages, assistantMessage],
+                  }
+                : c,
+            ),
+            files:
+              snippet && activeFile
+                ? p.files.map((f) => {
+                    if (f.id !== activeFile.id) return f
+                    if (rewriteFile) {
+                      const next = snippet.endsWith('\n') ? snippet : `${snippet}\n`
+                      return { ...f, content: next }
+                    }
+                    if (wantsRewrite && !rewriteFile) {
+                      return f
+                    }
+                    const needsNewline = f.content.length > 0 && !f.content.endsWith('\n')
+                    const next =
+                      f.content + (needsNewline ? '\n' : '') + snippet + (snippet.endsWith('\n') ? '' : '\n')
+                    return { ...f, content: next }
+                  })
+                : p.files,
+          }
+        }),
+      }))
     } catch (err) {
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
@@ -1164,7 +1348,7 @@ function App() {
                       >
                         Sign up
                       </button>
-                    </div>
+      </div>
                     <form className="auth-form" onSubmit={handleAuthSubmit}>
                       <input
                         className="account-input"
@@ -1185,7 +1369,7 @@ function App() {
                       {authError && <p className="auth-error">{authError}</p>}
                       <button type="submit" className="chat-send-button" disabled={authLoading}>
                         {authLoading ? '…' : authMode === 'signup' ? 'Sign up' : 'Log in'}
-                      </button>
+        </button>
                     </form>
                   </>
                 )}
@@ -1756,36 +1940,47 @@ function App() {
                       <p>
                         Use this to simulate different repositories or files when testing the Worker and
                         UI, similar to a lightweight Cursor-like experience.
-                      </p>
-                    </div>
+        </p>
+      </div>
                   </div>
                   <div className="right-pane-section">
                     <div className="right-pane-title">Share &amp; import</div>
                     <div className="right-pane-body">
-                      <p>Share the current project so others can import it by your username.</p>
-                      <button
-                        type="button"
-                        className="chat-send-button secondary"
-                        onClick={handleShareProject}
-                      >
-                        Share current project
-                      </button>
+                      <p>Share the current project with another user so it appears in their shared projects list.</p>
+                      <p className="right-pane-label" style={{ marginTop: '0.5rem' }}>
+                        Share with username
+                      </p>
+                      <div className="auth-form">
+                        <input
+                          className="account-input"
+                          type="text"
+                          placeholder="Partner's username"
+                          value={shareTargetUsername}
+                          onChange={(e) => setShareTargetUsername(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="chat-send-button secondary"
+                          onClick={handleShareProject}
+                        >
+                          Share current project
+                        </button>
+                      </div>
                       {shareStatus && (
                         <p className={shareStatus.startsWith('Shared') ? 'share-status' : 'auth-error'}>
                           {shareStatus}
                         </p>
                       )}
                       <p className="right-pane-label" style={{ marginTop: '0.75rem' }}>
-                        Import by username
+                        Projects shared with you
+                      </p>
+                      <p className="right-pane-hint">
+                        Click below to refresh. You&apos;ll see projects <strong>others shared with you</strong> and
+                        projects <strong>you shared with someone</strong>—open any copy in your workspace. Sharing uses
+                        the same Cloudflare KV as this Worker: if you get Unauthorized, log out and log in again; you
+                        and your partner should use the same dev setup (same machine or same deployed URL).
                       </p>
                       <div className="auth-form">
-                        <input
-                          className="account-input"
-                          type="text"
-                          placeholder="Username"
-                          value={importUsername}
-                          onChange={(e) => setImportUsername(e.target.value)}
-                        />
                         <button
                           type="button"
                           className="chat-send-button"
@@ -1795,21 +1990,76 @@ function App() {
                           {importLoading ? 'Loading…' : 'Load shared projects'}
                         </button>
                         {importError && <p className="auth-error">{importError}</p>}
-                        {importProjects.length > 0 && (
-                          <div className="import-list">
-                            {importProjects.map((p) => (
-                              <button
-                                key={p.id}
-                                type="button"
-                                className="sidebar-button"
-                                onClick={() => handleImportProject(p.id)}
-                              >
-                                {p.name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
                       </div>
+                      {importListFetched && (
+                        <div className="shared-projects-panel" aria-live="polite">
+                          <div className="shared-projects-panel-title">
+                            {sharingTotal === 0
+                              ? 'No sharing activity yet'
+                              : `${sharingTotal} ${sharingTotal === 1 ? 'project' : 'projects'} (incoming + outgoing)`}
+                          </div>
+                          {sharingTotal === 0 ? (
+                            <p className="shared-projects-empty">
+                              Share a project with someone (enter their username and click Share)—then click Load again
+                              and it will appear under &quot;You shared&quot;. Recipients see it under &quot;Shared with
+                              you&quot; when they load.
+                            </p>
+                          ) : (
+                            <>
+                              {importIncoming.length > 0 && (
+                                <>
+                                  <div className="shared-projects-subheading">Shared with you</div>
+                                  <ul className="shared-projects-list">
+                                    {importIncoming.map((p) => (
+                                      <li key={`in-${p.id}`} className="shared-projects-row">
+                                        <div className="shared-projects-meta">
+                                          <span className="shared-projects-name">{p.name}</span>
+                                          {p.ownerId && (
+                                            <span className="shared-projects-owner">from @{p.ownerId}</span>
+                                          )}
+                                        </div>
+                                        <button
+                                          type="button"
+                                          className="shared-projects-open-btn"
+                                          onClick={() => handleImportProject(p.id)}
+                                        >
+                                          Open
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </>
+                              )}
+                              {importOutgoing.length > 0 && (
+                                <>
+                                  <div className="shared-projects-subheading shared-projects-subheading-out">
+                                    You shared
+                                  </div>
+                                  <ul className="shared-projects-list">
+                                    {importOutgoing.map((p) => (
+                                      <li key={`out-${p.id}`} className="shared-projects-row">
+                                        <div className="shared-projects-meta">
+                                          <span className="shared-projects-name">{p.name}</span>
+                                          {p.sharedWith && (
+                                            <span className="shared-projects-owner">with @{p.sharedWith}</span>
+                                          )}
+                                        </div>
+                                        <button
+                                          type="button"
+                                          className="shared-projects-open-btn"
+                                          onClick={() => handleImportProject(p.id)}
+                                        >
+                                          Open
+                                        </button>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>

@@ -21,6 +21,7 @@ npm-debug.log*
 .idea
 .vscode/*
 !.vscode/extensions.json
+!.vscode/tasks.json
 *.sw?
 
 # Test / Playwright

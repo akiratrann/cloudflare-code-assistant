@@ -10,8 +10,8 @@ A Cursor-like coding assistant running on Cloudflare: Workers AI (Llama 3.3), KV
 # Terminal 1 – Worker (API + AI + KV)
 cd worker
 npm install
-npx wrangler kv:namespace create SESSION_KV   # once; put id in wrangler.toml
-npx wrangler dev --local
+npx wrangler kv namespace create SESSION_KV   # once; put returned id in worker/wrangler.toml
+npx wrangler dev --port 8787                  # or: npx wrangler dev --local --port 8787
 
 # Terminal 2 – Frontend
 cd app
